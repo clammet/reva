@@ -37,6 +37,7 @@ import (
 	"github.com/opencloud-eu/reva/v2/pkg/appctx"
 	"github.com/opencloud-eu/reva/v2/pkg/errtypes"
 	"github.com/opencloud-eu/reva/v2/pkg/rhttp"
+	"github.com/opencloud-eu/reva/v2/pkg/storage/utils/preconditions"
 	"github.com/opencloud-eu/reva/v2/pkg/storagespace"
 	"github.com/opencloud-eu/reva/v2/pkg/utils"
 	"github.com/rs/zerolog"
@@ -143,6 +144,12 @@ func (s *svc) handlePut(ctx context.Context, w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	conditions, err := preconditions.FromHTTP(r.Header)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
 	length, err := getContentLength(r)
 	if err != nil {
 		log.Error().Err(err).Msg("error getting the content length")
@@ -204,7 +211,7 @@ func (s *svc) handlePut(ctx context.Context, w http.ResponseWriter, r *http.Requ
 		// TODO: find a way to check if the storage really accepted the value
 		w.Header().Set(net.HeaderOCMtime, "accepted")
 	}
-	if length == 0 {
+	if length == 0 && conditions.Empty() {
 		tfRes, err := client.TouchFile(ctx, &provider.TouchFileRequest{
 			Opaque: opaque,
 			Ref:    ref,
@@ -279,9 +286,7 @@ func (s *svc) handlePut(ctx context.Context, w http.ResponseWriter, r *http.Requ
 		Opaque: opaque,
 		LockId: requestLock(r),
 	}
-	if ifMatch := r.Header.Get(net.HeaderIfMatch); ifMatch != "" {
-		uReq.Options = &provider.InitiateFileUploadRequest_IfMatch{IfMatch: ifMatch}
-	}
+	setUploadConditions(uReq, conditions)
 
 	// where to upload the file?
 	uRes, err := client.InitiateFileUpload(ctx, uReq)

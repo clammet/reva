@@ -46,6 +46,7 @@ import (
 	"github.com/opencloud-eu/reva/v2/pkg/rhttp/router"
 	"github.com/opencloud-eu/reva/v2/pkg/storage"
 	"github.com/opencloud-eu/reva/v2/pkg/storage/fs/registry"
+	"github.com/opencloud-eu/reva/v2/pkg/storage/utils/preconditions"
 	"github.com/opencloud-eu/reva/v2/pkg/storagespace"
 	"github.com/opencloud-eu/reva/v2/pkg/utils"
 	"github.com/pkg/errors"
@@ -317,7 +318,7 @@ func (s *Service) InitiateFileDownload(ctx context.Context, req *provider.Initia
 }
 
 func validateIfMatch(ifMatch string, info *provider.ResourceInfo) bool {
-	return ifMatch == info.GetEtag()
+	return (preconditions.Conditions{IfMatch: ifMatch}).Evaluate(info != nil, info.GetEtag()) == nil
 }
 
 func validateIfUnmodifiedSince(ifUnmodifiedSince *typesv1beta1.Timestamp, info *provider.ResourceInfo) bool {
@@ -345,33 +346,25 @@ func (s *Service) InitiateFileUpload(ctx context.Context, req *provider.Initiate
 	if err != nil {
 		return nil, err
 	}
-	switch sRes.Status.Code {
-	case rpc.Code_CODE_OK:
-		if req.GetIfNotExist() {
-			return &provider.InitiateFileUploadResponse{
-				Status: status.NewAlreadyExists(ctx, errors.New("already exists"), "already exists"),
-			}, nil
-		}
-	case rpc.Code_CODE_NOT_FOUND:
-		// Just continue with a normal upload
-	default:
-		return &provider.InitiateFileUploadResponse{
-			Status: sRes.Status,
-		}, nil
+	if sRes.Status.Code != rpc.Code_CODE_OK && sRes.Status.Code != rpc.Code_CODE_NOT_FOUND {
+		return &provider.InitiateFileUploadResponse{Status: sRes.Status}, nil
 	}
-
-	metadata := map[string]string{}
-	ifMatch := req.GetIfMatch()
-	if ifMatch != "" {
-		if !validateIfMatch(ifMatch, sRes.GetInfo()) {
-			return &provider.InitiateFileUploadResponse{
-				Status: status.NewAborted(ctx, errors.New("etag mismatch"), "etag mismatch"),
-			}, nil
-		}
-		metadata["if-match"] = ifMatch
+	conditions := preconditions.FromOpaque(req.Opaque)
+	if req.GetIfMatch() != "" {
+		conditions.IfMatch = req.GetIfMatch()
 	}
+	if req.GetIfNotExist() {
+		conditions.IfNoneMatch = "*"
+	}
+	if err := conditions.Validate(); err != nil {
+		return &provider.InitiateFileUploadResponse{Status: status.NewInvalid(ctx, err.Error())}, nil
+	}
+	if err := conditions.Evaluate(sRes.Status.Code == rpc.Code_CODE_OK, sRes.GetInfo().GetEtag()); err != nil {
+		return &provider.InitiateFileUploadResponse{Status: status.NewAborted(ctx, err, "entity-tag precondition failed")}, nil
+	}
+	metadata := conditions.Metadata()
 	ifUnmodifiedSince := req.GetIfUnmodifiedSince()
-	if ifUnmodifiedSince != nil {
+	if ifUnmodifiedSince != nil && conditions.IfMatch == "" {
 		metadata["if-unmodified-since"] = utils.TSToTime(ifUnmodifiedSince).Format(time.RFC3339Nano)
 		if !validateIfUnmodifiedSince(ifUnmodifiedSince, sRes.GetInfo()) {
 			return &provider.InitiateFileUploadResponse{
@@ -435,6 +428,8 @@ func (s *Service) InitiateFileUpload(ctx context.Context, req *provider.Initiate
 			st = status.NewPermissionDenied(ctx, err, "permission denied")
 		case errtypes.InsufficientStorage:
 			st = status.NewInsufficientStorage(ctx, err, "insufficient storage")
+		case errtypes.IsAborted:
+			st = status.NewAborted(ctx, err, "entity-tag precondition failed")
 		case errtypes.PreconditionFailed:
 			st = status.NewFailedPrecondition(ctx, err, "failed precondition")
 		case errtypes.Locked:

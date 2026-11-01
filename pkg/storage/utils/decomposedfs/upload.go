@@ -41,6 +41,7 @@ import (
 	"github.com/opencloud-eu/reva/v2/pkg/storage/utils/chunking"
 	"github.com/opencloud-eu/reva/v2/pkg/storage/utils/decomposedfs/node"
 	"github.com/opencloud-eu/reva/v2/pkg/storage/utils/decomposedfs/upload"
+	"github.com/opencloud-eu/reva/v2/pkg/storage/utils/preconditions"
 	"github.com/opencloud-eu/reva/v2/pkg/storagespace"
 	"github.com/opencloud-eu/reva/v2/pkg/utils"
 )
@@ -296,11 +297,21 @@ func (fs *Decomposedfs) InitiateUpload(ctx context.Context, ref *provider.Refere
 
 	usr := ctxpkg.ContextMustGetUser(ctx)
 
+	conditions := preconditions.FromMetadata(metadata)
+	var currentETag string
+	if n.Exists && !conditions.Empty() {
+		info, err := fs.GetMD(ctx, ref, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		currentETag = info.GetEtag()
+	}
+	if err := conditions.Evaluate(n.Exists, currentETag); err != nil {
+		return nil, err
+	}
+
 	// fill future node info
 	if n.Exists {
-		if session.HeaderIfNoneMatch() == "*" {
-			return nil, errtypes.Aborted(fmt.Sprintf("parent %s already has a child %s, id %s", n.ParentID, n.Name, n.ID))
-		}
 		session.SetStorageValue("NodeId", n.ID)
 		session.SetStorageValue("NodeExists", "true")
 	} else {

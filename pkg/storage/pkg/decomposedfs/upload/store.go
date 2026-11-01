@@ -43,6 +43,7 @@ import (
 	"github.com/opencloud-eu/reva/v2/pkg/storage/pkg/decomposedfs/node"
 	"github.com/opencloud-eu/reva/v2/pkg/storage/pkg/decomposedfs/options"
 	"github.com/opencloud-eu/reva/v2/pkg/storage/pkg/decomposedfs/usermapper"
+	"github.com/opencloud-eu/reva/v2/pkg/storage/utils/preconditions"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog"
 	tusd "github.com/tus/tusd/v2/pkg/handler"
@@ -315,23 +316,8 @@ func (store DecomposedFsStore) updateExistingNode(ctx context.Context, session *
 		return unlock, err
 	}
 
-	// When the if-match header was set we need to check if the
-	// etag still matches before finishing the upload.
-	if session.HeaderIfMatch() != "" && session.HeaderIfMatch() != oldNodeEtag {
-		return unlock, errtypes.Aborted("etag mismatch")
-	}
-
-	// When the if-none-match header was set we need to check if any of the
-	// etags matches before finishing the upload.
-	if session.HeaderIfNoneMatch() != "" {
-		if session.HeaderIfNoneMatch() == "*" {
-			return unlock, errtypes.Aborted("etag mismatch, resource exists")
-		}
-		for _, ifNoneMatchTag := range strings.Split(session.HeaderIfNoneMatch(), ",") {
-			if ifNoneMatchTag == oldNodeEtag {
-				return unlock, errtypes.Aborted("etag mismatch")
-			}
-		}
+	if err := (preconditions.Conditions{IfMatch: session.HeaderIfMatch(), IfNoneMatch: session.HeaderIfNoneMatch()}).Evaluate(old.Exists, oldNodeEtag); err != nil {
+		return unlock, err
 	}
 
 	// When the if-unmodified-since header was set we need to check if the

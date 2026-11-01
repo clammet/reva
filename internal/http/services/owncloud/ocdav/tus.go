@@ -36,6 +36,7 @@ import (
 	"github.com/opencloud-eu/reva/v2/internal/http/services/owncloud/ocdav/spacelookup"
 	"github.com/opencloud-eu/reva/v2/pkg/appctx"
 	"github.com/opencloud-eu/reva/v2/pkg/rhttp"
+	"github.com/opencloud-eu/reva/v2/pkg/storage/utils/preconditions"
 	"github.com/opencloud-eu/reva/v2/pkg/storagespace"
 	"github.com/opencloud-eu/reva/v2/pkg/utils"
 	"github.com/rs/zerolog"
@@ -86,7 +87,7 @@ func (s *svc) handleSpacesTusPost(w http.ResponseWriter, r *http.Request, spaceI
 }
 
 func (s *svc) handleTusPost(ctx context.Context, w http.ResponseWriter, r *http.Request, meta map[string]string, ref *provider.Reference, log zerolog.Logger) {
-	w.Header().Add(net.HeaderAccessControlAllowHeaders, strings.Join([]string{net.HeaderTusResumable, net.HeaderUploadLength, net.HeaderUploadMetadata, net.HeaderIfMatch}, ", "))
+	w.Header().Add(net.HeaderAccessControlAllowHeaders, strings.Join([]string{net.HeaderTusResumable, net.HeaderUploadLength, net.HeaderUploadMetadata, net.HeaderIfMatch, net.HeaderIfNoneMatch}, ", "))
 	w.Header().Add(net.HeaderAccessControlExposeHeaders, strings.Join([]string{net.HeaderTusResumable, net.HeaderUploadOffset, net.HeaderLocation}, ", "))
 	w.Header().Set(net.HeaderTusExtension, "creation,creation-with-upload,checksum,expiration")
 
@@ -158,16 +159,16 @@ func (s *svc) handleTusPost(ctx context.Context, w http.ResponseWriter, r *http.
 		return
 	}
 
+	conditions, err := preconditions.FromHTTP(r.Header)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if err := conditions.Evaluate(sRes.Status.Code == rpc.Code_CODE_OK, info.GetEtag()); err != nil {
+		w.WriteHeader(http.StatusPreconditionFailed)
+		return
+	}
 	if info != nil {
-		clientETag := r.Header.Get(net.HeaderIfMatch)
-		serverETag := info.Etag
-		if clientETag != "" {
-			if clientETag != serverETag {
-				log.Warn().Str("client-etag", clientETag).Str("server-etag", serverETag).Msg("etags mismatch")
-				w.WriteHeader(http.StatusPreconditionFailed)
-				return
-			}
-		}
 		if isSecretFileDrop {
 			// find next filename
 			newName, status, err := FindName(ctx, client, filepath.Base(ref.Path), sRes.GetInfo().GetParentId())
@@ -193,7 +194,7 @@ func (s *svc) handleTusPost(ctx context.Context, w http.ResponseWriter, r *http.
 		return
 	}
 	mtime := meta["mtime"]
-	if uploadLength == 0 {
+	if uploadLength == 0 && conditions.Empty() {
 		opaque := &typespb.Opaque{}
 		// Some web clients send "null", and the storages fail the touch on an unparsable mtime.
 		if _, err := utils.MTimeToTime(mtime); err == nil {
@@ -249,6 +250,8 @@ func (s *svc) handleTusPost(ctx context.Context, w http.ResponseWriter, r *http.
 			Map: opaqueMap,
 		},
 	}
+
+	setUploadConditions(uReq, conditions)
 
 	uRes, err := client.InitiateFileUpload(ctx, uReq)
 	if err != nil {
