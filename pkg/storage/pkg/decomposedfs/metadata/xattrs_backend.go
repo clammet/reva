@@ -51,7 +51,10 @@ func (XattrsBackend) Name() string { return "xattrs" }
 
 // IdentifyPath returns the space id, node id and mtime of a file
 func (b XattrsBackend) IdentifyPath(_ context.Context, path string) (string, string, string, time.Time, error) {
-	spaceID, _ := xattr.Get(path, prefixes.SpaceIDAttr)
+	spaceID, err := xattr.Get(path, prefixes.SpaceIDAttr)
+	if err != nil {
+		return "", "", "", time.Time{}, err
+	}
 	id, _ := xattr.Get(path, prefixes.IDAttr)
 	parentID, _ := xattr.Get(path, prefixes.ParentidAttr)
 
@@ -121,6 +124,10 @@ func (b XattrsBackend) list(ctx context.Context, n MetadataNode, acquireLock boo
 // unless the caller already holds the node's metadata lock (n.LockHeld()).
 func (b XattrsBackend) All(ctx context.Context, n MetadataNode) (map[string][]byte, error) {
 	return b.getAll(ctx, n, false, !n.LockHeld())
+}
+
+func (b XattrsBackend) AllFresh(ctx context.Context, n MetadataNode) (map[string][]byte, error) {
+	return b.getAll(ctx, n, true, !n.LockHeld())
 }
 
 func (b XattrsBackend) getAll(ctx context.Context, n MetadataNode, skipCache, acquireLock bool) (map[string][]byte, error) {

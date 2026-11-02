@@ -315,6 +315,7 @@ func NewTestEnv(config map[string]interface{}) (*TestEnv, error) {
 	}
 	aspects := aspects.Aspects{
 		Lookup:      lu,
+		UserMapper:  um,
 		Tree:        tree,
 		Permissions: p,
 		Trashbin:    tb,

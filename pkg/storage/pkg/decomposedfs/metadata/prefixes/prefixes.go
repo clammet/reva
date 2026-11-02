@@ -45,6 +45,7 @@ var (
 	// updated when the file is renamed or moved
 	NameAttr string = OcPrefix + "name"
 
+	RevisionAttr string = OcPrefix + "revision"
 	BlobIDAttr   string = OcPrefix + "blobid"
 	BlobsizeAttr string = OcPrefix + "blobsize"
 
@@ -156,6 +157,7 @@ func setKeys(p string) {
 	OwnerIDPAttr = p + "owner.idp"
 	OwnerTypeAttr = p + "owner.type"
 	NameAttr = p + "name"
+	RevisionAttr = p + "revision"
 	BlobIDAttr = p + "blobid"
 	BlobsizeAttr = p + "blobsize"
 	StatusPrefix = p + "nodestatus"

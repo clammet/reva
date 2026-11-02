@@ -192,6 +192,50 @@ type Session interface {
 func (store DecomposedFsStore) CreateNodeForUpload(ctx context.Context, session *DecomposedFsSession, initAttrs node.Attributes) (*node.Node, error) {
 	ctx, span := tracer.Start(session.Context(ctx), "CreateNodeForUpload")
 	defer span.End()
+	exclusive := !session.NodeExists()
+	unlockNamespace, err := node.LockNamespace(ctx, store.lu, session.SpaceID(), exclusive)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = unlockNamespace() }()
+	resolve := func() (*node.Node, error) {
+		return store.lu.NodeFromResource(ctx, &provider.Reference{
+			ResourceId: &provider.ResourceId{SpaceId: session.SpaceID(), OpaqueId: session.NodeParentID()},
+			Path:       session.Filename(),
+		})
+	}
+	current, err := resolve()
+	if err != nil {
+		return nil, err
+	}
+	if !current.Exists && !exclusive {
+		_ = unlockNamespace()
+		unlockNamespace, err = node.LockNamespace(ctx, store.lu, session.SpaceID(), true)
+		if err != nil {
+			unlockNamespace = func() error { return nil }
+			return nil, err
+		}
+		current, err = resolve()
+		if err != nil {
+			return nil, err
+		}
+	}
+	conditions := preconditions.Conditions{IfMatch: session.HeaderIfMatch(), IfNoneMatch: session.HeaderIfNoneMatch()}
+	if !current.Exists {
+		if err := conditions.Evaluate(false, ""); err != nil {
+			return nil, err
+		}
+		if session.NodeExists() {
+			session.SetStorageValue("NodeId", uuid.New().String())
+		}
+		session.SetStorageValue("NodeExists", "false")
+	} else {
+		if current.IsDir(ctx) {
+			return nil, errtypes.PreconditionFailed("resource is not a file")
+		}
+		session.SetStorageValue("NodeId", current.ID)
+		session.SetStorageValue("NodeExists", "true")
+	}
 	n := node.New(
 		session.SpaceID(),
 		session.NodeID(),
@@ -203,7 +247,6 @@ func (store DecomposedFsStore) CreateNodeForUpload(ctx context.Context, session 
 		nil,
 		store.lu,
 	)
-	var err error
 	n.SpaceRoot, err = node.ReadNode(ctx, store.lu, session.SpaceID(), session.SpaceID(), "", false, nil, false)
 	if err != nil {
 		return nil, err
@@ -215,15 +258,7 @@ func (store DecomposedFsStore) CreateNodeForUpload(ctx context.Context, session 
 	}
 
 	var unlock metadata.UnlockFunc
-	if session.NodeExists() { // TODO this is wrong. The node should be created when the upload starts, the revisions should be created independently of the node
-		// we do not need to propagate a change when a node is created, only when the upload is ready.
-		// that still creates problems for desktop clients because if another change causes propagation it will detects an empty file
-		// so the first upload has to point to the first revision with the expected size. The file cannot be downloaded, but it can be overwritten (which will create a new revision and make the node reflect the latest revision)
-		// any finished postprocessing will not affect the node metadata.
-		// *thinking* but then initializing an upload will lock the file until the upload has finished. That sucks.
-		// so we have to check if the node has been created meanwhile (well, only in case the upload does not know the nodeid ... or the NodeExists array that is checked by session.NodeExists())
-		// FIXME look at the disk again to see if the file has been created in between, or just try initializing a new node and do the update existing node as a fallback. <- the latter!
-
+	if session.NodeExists() {
 		unlock, err = store.updateExistingNode(ctx, session, n, session.SpaceID(), uint64(session.Size()))
 		if err != nil {
 			appctx.GetLogger(ctx).Error().Err(err).Msg("failed to update existing node")
@@ -238,6 +273,9 @@ func (store DecomposedFsStore) CreateNodeForUpload(ctx context.Context, session 
 
 		unlock, err = store.tp.InitNewNode(ctx, n, uint64(session.Size()))
 		if err != nil {
+			if _, exists := err.(errtypes.IsAlreadyExists); exists && !conditions.Empty() {
+				err = errtypes.Aborted("resource created during upload")
+			}
 			appctx.GetLogger(ctx).Error().Str("path", n.InternalPath()).Err(err).Msg("failed to init new node")
 		}
 		session.info.MetaData["sizeDiff"] = strconv.FormatInt(session.Size(), 10)
@@ -262,6 +300,7 @@ func (store DecomposedFsStore) CreateNodeForUpload(ctx context.Context, session 
 	initAttrs.SetString(prefixes.ParentidAttr, n.ParentID)
 	initAttrs.SetString(prefixes.NameAttr, n.Name)
 	initAttrs.SetString(prefixes.BlobIDAttr, n.BlobID)
+	initAttrs.SetString(prefixes.RevisionAttr, session.ID())
 	initAttrs.SetInt64(prefixes.BlobsizeAttr, n.Blobsize)
 	initAttrs.SetString(prefixes.StatusPrefix, node.ProcessingStatus+session.ID())
 
@@ -296,13 +335,15 @@ func (store DecomposedFsStore) updateExistingNode(ctx context.Context, session *
 	_, span := tracer.Start(ctx, "updateExistingNode")
 	defer span.End()
 
-	// write lock existing node before reading any metadata
-	unlock, err := store.lu.MetadataBackend().Lock(n)
+	old, release, err := node.LockAndReadNode(ctx, store.lu, spaceID, n.ID, "", false, n.SpaceRoot, false)
 	if err != nil {
+		if _, missing := err.(errtypes.IsNotFound); missing && session.HeaderIfMatch() != "" {
+			return nil, errtypes.Aborted("resource removed during upload")
+		}
 		return nil, err
 	}
-
-	old, _ := node.ReadNode(ctx, store.lu, spaceID, n.ID, "", false, nil, false)
+	n.SetLockHeld(true)
+	unlock := func() error { n.SetLockHeld(false); return release() }
 	if _, err := node.CheckQuota(ctx, n.SpaceRoot, true, uint64(old.Blobsize), fsize); err != nil {
 		return unlock, err
 	}
@@ -311,7 +352,7 @@ func (store DecomposedFsStore) updateExistingNode(ctx context.Context, session *
 	if err != nil {
 		return unlock, err
 	}
-	oldNodeEtag, err := node.CalculateEtag(old.ID, oldNodeMtime)
+	oldNodeEtag, err := old.ETag(ctx)
 	if err != nil {
 		return unlock, err
 	}

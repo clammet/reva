@@ -318,6 +318,12 @@ func (session *DecomposedFsSession) Finalize(ctx context.Context) (err error) {
 	ctx, span := tracer.Start(session.Context(ctx), "Finalize")
 	defer span.End()
 
+	unlockNamespace, err := node.LockNamespace(ctx, session.store.lu, session.SpaceID(), false)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = unlockNamespace() }()
+
 	n := node.New(session.SpaceID(), session.NodeID(), "", "", session.Size(), session.ID(),
 		provider.ResourceType_RESOURCE_TYPE_FILE, session.SpaceOwner(), session.store.lu)
 
@@ -345,7 +351,7 @@ func (session *DecomposedFsSession) Finalize(ctx context.Context) (err error) {
 	}()
 
 	// Read the node attributes while holding the lock acquired above.
-	attribs, err := n.Xattrs(ctx)
+	attribs, err := n.FreshXattrs(ctx)
 	if err != nil {
 		return err
 	}

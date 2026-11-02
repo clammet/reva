@@ -205,13 +205,22 @@ func (b MessagePackBackend) saveAttributes(ctx context.Context, n MetadataNode, 
 	return err
 }
 
+func (b MessagePackBackend) AllFresh(ctx context.Context, n MetadataNode) (map[string][]byte, error) {
+	return b.readAttributes(ctx, n, true)
+}
+
 func (b MessagePackBackend) loadAttributes(ctx context.Context, n MetadataNode) (map[string][]byte, error) {
+	return b.readAttributes(ctx, n, false)
+}
+
+func (b MessagePackBackend) readAttributes(ctx context.Context, n MetadataNode, fresh bool) (map[string][]byte, error) {
 	ctx, span := tracer.Start(ctx, "loadAttributes")
 	defer span.End()
 	attribs := map[string][]byte{}
-	err := b.metaCache.PullFromCache(b.cacheKey(n), &attribs)
-	if err == nil {
-		return attribs, err
+	if !fresh {
+		if err := b.metaCache.PullFromCache(b.cacheKey(n), &attribs); err == nil {
+			return attribs, nil
+		}
 	}
 
 	metaPath := b.MetadataPath(n)

@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/opencloud-eu/reva/v2/pkg/storage/pkg/decomposedfs/metadata"
 	"github.com/pkg/xattr"
 )
 
@@ -213,4 +214,15 @@ func (n *Node) XattrUint64(ctx context.Context, key string) (uint64, error) {
 		return 0, err
 	}
 	return strconv.ParseUint(b, 10, 64)
+}
+
+// FreshXattrs bypasses metadata caches while the caller holds the node lock.
+func (n *Node) FreshXattrs(ctx context.Context) (Attributes, error) {
+	n.ResetXattrsCache()
+	return n.loadXattrs(func() (Attributes, error) {
+		if b, ok := n.lu.MetadataBackend().(metadata.FreshReader); ok {
+			return b.AllFresh(ctx, n)
+		}
+		return n.lu.MetadataBackend().All(ctx, n)
+	})
 }

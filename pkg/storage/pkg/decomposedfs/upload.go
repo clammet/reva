@@ -124,7 +124,7 @@ func (fs *Decomposedfs) Upload(ctx context.Context, req storage.UploadRequest, u
 	}
 
 	// add etag to metadata
-	ri.Etag, _ = node.CalculateEtag(session.NodeID(), session.MTime())
+	ri.Etag, _ = node.CalculateEtag(session.NodeID()+":"+session.ID(), session.MTime())
 
 	if !session.MTime().IsZero() {
 		ri.Mtime = utils.TimeToTS(session.MTime())

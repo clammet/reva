@@ -378,7 +378,10 @@ func (t *Tree) TouchFile(ctx context.Context, n *node.Node, markprocessing bool,
 	if err := os.MkdirAll(filepath.Dir(nodePath), 0700); err != nil {
 		return errors.Wrap(err, "posixfs: error creating node")
 	}
-	f, err := os.Create(nodePath)
+	f, err := os.OpenFile(nodePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if os.IsExist(err) {
+		return errtypes.AlreadyExists(nodePath)
+	}
 	if err != nil {
 		return errors.Wrap(err, "posixfs: error creating node")
 	}

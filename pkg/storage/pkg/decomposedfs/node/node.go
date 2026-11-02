@@ -509,7 +509,11 @@ func readNode(ctx context.Context, lu PathLookup, spaceID, nodeID, internalPath 
 	}()
 
 	var attrs Attributes
-	attrs, err = n.Xattrs(ctx)
+	if alreadyLocked {
+		attrs, err = n.FreshXattrs(ctx)
+	} else {
+		attrs, err = n.Xattrs(ctx)
+	}
 	switch {
 	case metadata.IsNotExist(err):
 		return n, nil // swallow not found, the node defaults to exists = false
@@ -754,6 +758,23 @@ func CalculateEtag(id string, tmTime time.Time) (string, error) {
 	return fmt.Sprintf(`"%x"`, h.Sum(nil)), nil
 }
 
+// ETag returns the advertised validator, including the committed upload identity.
+// Nodes without a revision attribute retain their existing validator until modified.
+func (n *Node) ETag(ctx context.Context) (string, error) {
+	if b, err := n.XattrString(ctx, prefixes.TmpEtagAttr); err == nil && b != "" {
+		return fmt.Sprintf(`"%x"`, b), nil
+	}
+	tm, err := n.GetTMTime(ctx)
+	if err != nil {
+		return "", err
+	}
+	id := n.ID
+	if revision, err := n.XattrString(ctx, prefixes.RevisionAttr); err == nil && revision != "" {
+		id += ":" + revision
+	}
+	return CalculateEtag(id, tm)
+}
+
 // SetMtimeString sets the mtime and atime of a node to the unixtime parsed from the given string
 func (n *Node) SetMtimeString(ctx context.Context, mtime string) error {
 	mt, err := utils.MTimeToTime(mtime)
@@ -878,10 +899,8 @@ func (n *Node) AsResourceInfo(ctx context.Context, rp *provider.ResourcePermissi
 		sublog.Debug().Err(err).Msg("could not get tmtime")
 	}
 
-	// use temporary etag if it is set
-	if b, err := n.XattrString(ctx, prefixes.TmpEtagAttr); err == nil && b != "" {
-		ri.Etag = fmt.Sprintf(`"%x"`, b)
-	} else if ri.Etag, err = CalculateEtag(n.ID, tmTime); err != nil {
+	ri.Etag, err = n.ETag(ctx)
+	if err != nil {
 		sublog.Debug().Err(err).Msg("could not calculate etag")
 	}
 
@@ -1634,10 +1653,14 @@ func (n *Node) RevertUpload(ctx context.Context, versionID string) error {
 		return err
 	}
 
+	if err := n.SetXattrString(ctx, prefixes.RevisionAttr, uuid.NewString()); err != nil {
+		return err
+	}
 	if err := n.lu.CopyMetadata(ctx, revisionNode, n, func(attributeName string, value []byte) (newValue []byte, copy bool) {
 		return value, strings.HasPrefix(attributeName, prefixes.ChecksumPrefix) ||
 			attributeName == prefixes.TypeAttr ||
 			attributeName == prefixes.BlobIDAttr ||
+			attributeName == prefixes.RevisionAttr ||
 			attributeName == prefixes.BlobsizeAttr ||
 			attributeName == prefixes.MTimeAttr
 	}); err != nil {

@@ -29,6 +29,7 @@ import (
 	"time"
 
 	provider "github.com/cs3org/go-cs3apis/cs3/storage/provider/v1beta1"
+	"github.com/google/uuid"
 	"github.com/pkg/errors"
 
 	"github.com/opencloud-eu/reva/v2/pkg/appctx"
@@ -121,6 +122,7 @@ func (tp *Tree) CreateRevision(ctx context.Context, n *node.Node, version string
 		return value, strings.HasPrefix(attributeName, prefixes.ChecksumPrefix) ||
 			attributeName == prefixes.TypeAttr ||
 			attributeName == prefixes.BlobIDAttr ||
+			attributeName == prefixes.RevisionAttr ||
 			attributeName == prefixes.BlobsizeAttr ||
 			attributeName == prefixes.MTimeAttr
 	}); err != nil {
@@ -276,10 +278,14 @@ func (tp *Tree) DownloadRevision(ctx context.Context, ref *provider.Reference, r
 }
 
 func (tp *Tree) RestoreRevision(ctx context.Context, sourceNode, targetNode metadata.MetadataNode, mtime time.Time) error {
+	if err := tp.lookup.MetadataBackend().SetMultiple(ctx, targetNode, map[string][]byte{prefixes.RevisionAttr: []byte(uuid.NewString())}); err != nil {
+		return err
+	}
 	err := tp.lookup.CopyMetadata(ctx, sourceNode, targetNode, func(attributeName string, value []byte) (newValue []byte, copy bool) {
 		return value, strings.HasPrefix(attributeName, prefixes.ChecksumPrefix) ||
 			attributeName == prefixes.TypeAttr ||
 			attributeName == prefixes.BlobIDAttr ||
+			attributeName == prefixes.RevisionAttr ||
 			attributeName == prefixes.BlobsizeAttr
 	})
 	if err != nil {

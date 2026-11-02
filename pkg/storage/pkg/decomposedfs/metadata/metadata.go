@@ -49,6 +49,10 @@ type MetadataNode interface {
 }
 
 // Backend defines the interface for file attribute backends
+type FreshReader interface {
+	AllFresh(context.Context, MetadataNode) (map[string][]byte, error)
+}
+
 type Backend interface {
 	Name() string
 	IdentifyPath(ctx context.Context, path string) (string, string, string, time.Time, error)

@@ -137,6 +137,17 @@ func (b HybridBackend) All(ctx context.Context, n MetadataNode) (map[string][]by
 	return b.getAll(ctx, n, false)
 }
 
+func (b HybridBackend) AllFresh(ctx context.Context, n MetadataNode) (map[string][]byte, error) {
+	if !n.LockHeld() {
+		unlock, err := b.Lock(n)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = unlock() }()
+	}
+	return b.getAll(ctx, n, false)
+}
+
 func (b HybridBackend) getAll(ctx context.Context, n MetadataNode, skipOffloaded bool) (map[string][]byte, error) {
 	attribs := map[string][]byte{}
 	attrNames, err := b.list(ctx, n)
