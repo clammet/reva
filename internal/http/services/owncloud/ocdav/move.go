@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net/http"
 	"path"
+	"strconv"
 
 	rpc "github.com/cs3org/go-cs3apis/cs3/rpc/v1beta1"
 	provider "github.com/cs3org/go-cs3apis/cs3/storage/provider/v1beta1"
@@ -33,6 +34,8 @@ import (
 	"github.com/opencloud-eu/reva/v2/pkg/errtypes"
 	rstatus "github.com/opencloud-eu/reva/v2/pkg/rgrpc/status"
 	"github.com/opencloud-eu/reva/v2/pkg/rhttp/router"
+	"github.com/opencloud-eu/reva/v2/pkg/storage"
+	"github.com/opencloud-eu/reva/v2/pkg/storage/utils/preconditions"
 	"github.com/opencloud-eu/reva/v2/pkg/storagespace"
 	"github.com/opencloud-eu/reva/v2/pkg/utils"
 	"github.com/rs/zerolog"
@@ -151,6 +154,11 @@ func (s *svc) handleSpacesMove(w http.ResponseWriter, r *http.Request, srcSpaceI
 }
 
 func (s *svc) handleMove(ctx context.Context, w http.ResponseWriter, r *http.Request, src, dst *provider.Reference, log zerolog.Logger) {
+	conditions, err := preconditions.FromHTTP(r.Header)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
 	isChild, err := s.referenceIsChildOf(ctx, s.gatewaySelector, dst, src)
 	if err != nil {
 		switch err.(type) {
@@ -235,6 +243,11 @@ func (s *svc) handleMove(ctx context.Context, w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	if err := conditions.Evaluate(true, srcStatRes.GetInfo().GetEtag()); err != nil {
+		w.WriteHeader(http.StatusPreconditionFailed)
+		return
+	}
+
 	// check dst exists
 	dstStatReq := &provider.StatRequest{Ref: dst}
 	dstStatRes, err := client.Stat(ctx, dstStatReq)
@@ -270,18 +283,20 @@ func (s *svc) handleMove(ctx context.Context, w http.ResponseWriter, r *http.Req
 			errors.HandleWebdavError(&log, w, b, err)
 			return
 		}
-		// delete existing tree
-		delReq := &provider.DeleteRequest{Ref: dst}
-		delRes, err := client.Delete(ctx, delReq)
-		if err != nil {
-			log.Error().Err(err).Msg("error sending grpc delete request")
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
+		if conditions.Empty() {
+			// delete existing tree
+			delReq := &provider.DeleteRequest{Ref: dst}
+			delRes, err := client.Delete(ctx, delReq)
+			if err != nil {
+				log.Error().Err(err).Msg("error sending grpc delete request")
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
 
-		if delRes.Status.Code != rpc.Code_CODE_OK && delRes.Status.Code != rpc.Code_CODE_NOT_FOUND {
-			errors.HandleErrorStatus(&log, w, delRes.Status)
-			return
+			if delRes.Status.Code != rpc.Code_CODE_OK && delRes.Status.Code != rpc.Code_CODE_NOT_FOUND {
+				errors.HandleErrorStatus(&log, w, delRes.Status)
+				return
+			}
 		}
 	} else {
 		// check if an intermediate path / the parent exists
@@ -317,6 +332,10 @@ func (s *svc) handleMove(ctx context.Context, w http.ResponseWriter, r *http.Req
 		Destination: dst,
 		LockId:      requestLock(r),
 	}
+	if !conditions.Empty() {
+		mReq.Opaque = conditions.Opaque(mReq.Opaque)
+		mReq.Opaque = utils.AppendPlainToOpaque(mReq.Opaque, storage.MoveOverwriteKey, strconv.FormatBool(overwrite))
+	}
 	mRes, err := client.Move(ctx, mReq)
 	if err != nil {
 		log.Error().Err(err).Msg("error sending move grpc request")
@@ -330,6 +349,10 @@ func (s *svc) handleMove(ctx context.Context, w http.ResponseWriter, r *http.Req
 		switch mRes.Status.Code {
 		case rpc.Code_CODE_ABORTED:
 			status = http.StatusPreconditionFailed
+		case rpc.Code_CODE_ALREADY_EXISTS:
+			if !overwrite {
+				status = http.StatusPreconditionFailed
+			}
 		case rpc.Code_CODE_PERMISSION_DENIED:
 			status = http.StatusForbidden
 		case rpc.Code_CODE_UNIMPLEMENTED:

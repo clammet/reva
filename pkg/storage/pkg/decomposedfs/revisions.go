@@ -55,6 +55,12 @@ func (fs *Decomposedfs) DownloadRevision(ctx context.Context, ref *provider.Refe
 
 // RestoreRevision restores the specified revision of the resource
 func (fs *Decomposedfs) RestoreRevision(ctx context.Context, ref *provider.Reference, revisionKey string) (returnErr error) {
+	unlockNamespace, lockErr := fs.lockNamespace(ctx, ref, false)
+	if lockErr != nil {
+		return lockErr
+	}
+	defer func() { _ = unlockNamespace() }()
+
 	_, span := tracer.Start(ctx, "RestoreRevision")
 	defer span.End()
 	log := appctx.GetLogger(ctx)
@@ -107,7 +113,6 @@ func (fs *Decomposedfs) RestoreRevision(ctx context.Context, ref *provider.Refer
 	}
 	defer func() {
 		_ = unlock()
-		_ = os.Remove(fs.lu.MetadataBackend().LockfilePath(n))
 	}()
 
 	// move current version to new revision
@@ -156,6 +161,12 @@ func (fs *Decomposedfs) RestoreRevision(ctx context.Context, ref *provider.Refer
 
 // DeleteRevision deletes the specified revision of the resource
 func (fs *Decomposedfs) DeleteRevision(ctx context.Context, ref *provider.Reference, revisionKey string) error {
+	unlockNamespace, lockErr := fs.lockNamespace(ctx, ref, false)
+	if lockErr != nil {
+		return lockErr
+	}
+	defer func() { _ = unlockNamespace() }()
+
 	_, span := tracer.Start(ctx, "DeleteRevision")
 	defer span.End()
 	n, err := fs.getRevisionNode(ctx, ref, revisionKey, func(rp *provider.ResourcePermissions) bool {

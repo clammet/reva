@@ -31,6 +31,7 @@ import (
 	"github.com/opencloud-eu/reva/v2/pkg/appctx"
 	"github.com/opencloud-eu/reva/v2/pkg/errtypes"
 	rstatus "github.com/opencloud-eu/reva/v2/pkg/rgrpc/status"
+	"github.com/opencloud-eu/reva/v2/pkg/storage/utils/preconditions"
 	"github.com/opencloud-eu/reva/v2/pkg/utils"
 )
 
@@ -61,9 +62,14 @@ func (s *svc) handleDelete(ctx context.Context, w http.ResponseWriter, r *http.R
 	ctx, span := appctx.GetTracerProvider(r.Context()).Tracer(tracerName).Start(ctx, "delete")
 	defer span.End()
 
+	conditions, err := preconditions.FromHTTP(r.Header)
+	if err != nil {
+		return http.StatusBadRequest, err
+	}
 	req := &provider.DeleteRequest{
 		Ref:    ref,
 		LockId: requestLock(r),
+		Opaque: conditions.Opaque(nil),
 	}
 
 	// FIXME the lock token is part of the application level protocol, it should be part of the DeleteRequest message not the opaque
@@ -88,6 +94,8 @@ func (s *svc) handleDelete(ctx context.Context, w http.ResponseWriter, r *http.R
 		return http.StatusInternalServerError, err
 	case res.Status.Code == rpc.Code_CODE_OK:
 		return http.StatusNoContent, nil
+	case res.Status.Code == rpc.Code_CODE_ABORTED:
+		return http.StatusPreconditionFailed, errtypes.NewErrtypeFromStatus(res.Status)
 	case res.Status.Code == rpc.Code_CODE_NOT_FOUND:
 		//lint:ignore ST1005 mimic the exact oc10 error message
 		return http.StatusNotFound, errors.New("Resource not found") //nolint:staticcheck

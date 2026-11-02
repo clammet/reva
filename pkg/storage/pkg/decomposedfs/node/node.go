@@ -378,6 +378,10 @@ func LockAndReadNode(ctx context.Context, lu PathLookup, spaceID, nodeID, intern
 
 	_, subspan := tracer.Start(ctx, "MetadataBackend.Lock")
 	bn := NewBaseNode(spaceID, nodeID, lu)
+	if bn.InternalPath() == "" {
+		subspan.End()
+		return nil, nil, errtypes.NotFound(nodeID)
+	}
 	unlock, err := lu.MetadataBackend().Lock(bn)
 	subspan.End()
 	if err != nil {

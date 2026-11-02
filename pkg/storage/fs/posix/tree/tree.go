@@ -356,15 +356,6 @@ func (t *Tree) TouchFile(ctx context.Context, n *node.Node, markprocessing bool,
 	parentPath := n.ParentPath()
 	nodePath := filepath.Join(parentPath, n.Name)
 
-	// lock the meta file
-	unlock, err := t.lookup.MetadataBackend().Lock(n)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = unlock()
-	}()
-
 	if n.ID == "" {
 		n.ID = uuid.New().String()
 	}
@@ -374,6 +365,15 @@ func (t *Tree) TouchFile(ctx context.Context, n *node.Node, markprocessing bool,
 	if err := t.lookup.CacheID(context.Background(), n.SpaceID, n.ID, nodePath); err != nil {
 		t.log.Error().Err(err).Str("spaceID", n.SpaceID).Str("id", n.ID).Str("path", nodePath).Msg("could not cache id")
 	}
+
+	// lock the meta file
+	unlock, err := t.lookup.MetadataBackend().Lock(n)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = unlock()
+	}()
 
 	if err := os.MkdirAll(filepath.Dir(nodePath), 0700); err != nil {
 		return errors.Wrap(err, "posixfs: error creating node")
@@ -713,8 +713,7 @@ func (t *Tree) Delete(ctx context.Context, n *node.Node) error {
 		}
 	}
 
-	// Remove metadata mlock file if it exists
-	_ = os.Remove(t.lookup.MetadataBackend().LockfilePath(n))
+	// Keep the metadata lock file stable for existing holders and waiters.
 
 	err := t.trashbin.MoveToTrash(ctx, n, path)
 	if err != nil {
@@ -850,6 +849,10 @@ func (t *Tree) createDirNode(ctx context.Context, n *node.Node) (err error) {
 	}
 	path := filepath.Join(parentPath, n.Name)
 
+	if err := idcache.Set(ctx, n.SpaceID, n.ID, path); err != nil {
+		t.log.Error().Err(err).Str("spaceID", n.SpaceID).Str("id", n.ID).Str("path", path).Msg("could not cache id")
+	}
+
 	// lock the meta file
 	unlock, err := t.lookup.MetadataBackend().Lock(n)
 	if err != nil {
@@ -861,10 +864,6 @@ func (t *Tree) createDirNode(ctx context.Context, n *node.Node) (err error) {
 
 	if err := os.MkdirAll(path, 0700); err != nil {
 		return errors.Wrap(err, "posixfs: error creating node")
-	}
-
-	if err := idcache.Set(ctx, n.SpaceID, n.ID, path); err != nil {
-		t.log.Error().Err(err).Str("spaceID", n.SpaceID).Str("id", n.ID).Str("path", path).Msg("could not cache id")
 	}
 
 	// Write mtime from filesystem to metadata to preven re-assimilation

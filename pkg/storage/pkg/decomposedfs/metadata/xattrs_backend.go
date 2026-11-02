@@ -91,6 +91,9 @@ func (b XattrsBackend) GetInt64(ctx context.Context, n MetadataNode, key string)
 
 func (b XattrsBackend) list(ctx context.Context, n MetadataNode, acquireLock bool) (attribs []string, err error) {
 	filePath := n.InternalPath()
+	if filePath == "" {
+		return nil, os.ErrNotExist
+	}
 	attrs, err := listXattr(ctx, filePath)
 	if err == nil {
 		return attrs, nil
@@ -300,6 +303,9 @@ func (XattrsBackend) LockfilePath(n MetadataNode) string { return n.InternalPath
 
 // Lock locks the metadata for the given path
 func (b XattrsBackend) Lock(n MetadataNode) (UnlockFunc, error) {
+	if n.InternalPath() == "" {
+		return nil, os.ErrNotExist
+	}
 	if n.LockHeld() {
 		return func() error { return nil }, nil
 	}

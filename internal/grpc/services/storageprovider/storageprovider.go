@@ -317,10 +317,6 @@ func (s *Service) InitiateFileDownload(ctx context.Context, req *provider.Initia
 	}, nil
 }
 
-func validateIfMatch(ifMatch string, info *provider.ResourceInfo) bool {
-	return (preconditions.Conditions{IfMatch: ifMatch}).Evaluate(info != nil, info.GetEtag()) == nil
-}
-
 func validateIfUnmodifiedSince(ifUnmodifiedSince *typesv1beta1.Timestamp, info *provider.ResourceInfo) bool {
 	switch {
 	case ifUnmodifiedSince == nil || info.GetMtime() == nil:
@@ -769,7 +765,17 @@ func (s *Service) Delete(ctx context.Context, req *provider.DeleteRequest) (*pro
 		}, nil
 	}
 
-	err = s.Storage.Delete(ctx, req.Ref)
+	conditions := preconditions.FromOpaque(req.Opaque)
+	if err := conditions.Validate(); err != nil {
+		return &provider.DeleteResponse{Status: status.NewInvalid(ctx, err.Error())}, nil
+	}
+	if conditions.Empty() {
+		err = s.Storage.Delete(ctx, req.Ref)
+	} else if fs, ok := s.Storage.(storage.ConditionalFS); ok {
+		err = fs.DeleteConditional(ctx, req.Ref, conditions)
+	} else {
+		err = errtypes.NotSupported("conditional delete is not supported by this storage")
+	}
 
 	return &provider.DeleteResponse{
 		Status: status.NewStatusFromErrType(ctx, "delete", err),
@@ -784,7 +790,20 @@ func (s *Service) Delete(ctx context.Context, req *provider.DeleteRequest) (*pro
 func (s *Service) Move(ctx context.Context, req *provider.MoveRequest) (*provider.MoveResponse, error) {
 	ctx = ctxpkg.ContextSetLockID(ctx, req.LockId)
 
-	result, err := s.Storage.Move(ctx, req.Source, req.Destination)
+	conditions := preconditions.FromOpaque(req.Opaque)
+	if err := conditions.Validate(); err != nil {
+		return &provider.MoveResponse{Status: status.NewInvalid(ctx, err.Error())}, nil
+	}
+	var result *storage.MoveResult
+	var err error
+	if conditions.Empty() {
+		result, err = s.Storage.Move(ctx, req.Source, req.Destination)
+	} else if fs, ok := s.Storage.(storage.ConditionalFS); ok {
+		overwrite := utils.ReadPlainFromOpaque(req.Opaque, storage.MoveOverwriteKey) == "true"
+		result, err = fs.MoveConditional(ctx, req.Source, req.Destination, storage.MoveOptions{Conditions: conditions, Overwrite: overwrite})
+	} else {
+		err = errtypes.NotSupported("conditional move is not supported by this storage")
+	}
 	if err == nil && result != nil {
 		storagespace.ContextSetMoveResult(ctx, result)
 	}

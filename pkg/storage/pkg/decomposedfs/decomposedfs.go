@@ -65,6 +65,7 @@ import (
 	"github.com/opencloud-eu/reva/v2/pkg/storage/pkg/decomposedfs/usermapper"
 	"github.com/opencloud-eu/reva/v2/pkg/storage/utils/chunking"
 	"github.com/opencloud-eu/reva/v2/pkg/storage/utils/filelocks"
+	"github.com/opencloud-eu/reva/v2/pkg/storage/utils/preconditions"
 	"github.com/opencloud-eu/reva/v2/pkg/storage/utils/templates"
 	"github.com/opencloud-eu/reva/v2/pkg/storagespace"
 	"github.com/opencloud-eu/reva/v2/pkg/store"
@@ -807,6 +808,11 @@ func (fs *Decomposedfs) GetPathByID(ctx context.Context, id *provider.ResourceId
 func (fs *Decomposedfs) CreateDir(ctx context.Context, ref *provider.Reference) (err error) {
 	ctx, span := tracer.Start(ctx, "CreateDir")
 	defer span.End()
+	unlockNamespace, lockErr := fs.lockNamespace(ctx, ref, true)
+	if lockErr != nil {
+		return lockErr
+	}
+	defer func() { _ = unlockNamespace() }()
 
 	name := path.Base(ref.Path)
 	if name == "" || name == "." || name == "/" {
@@ -870,6 +876,12 @@ func (fs *Decomposedfs) CreateDir(ctx context.Context, ref *provider.Reference) 
 func (fs *Decomposedfs) TouchFile(ctx context.Context, ref *provider.Reference, markprocessing bool, mtime string) error {
 	ctx, span := tracer.Start(ctx, "TouchFile")
 	defer span.End()
+	unlockNamespace, lockErr := fs.lockNamespace(ctx, ref, true)
+	if lockErr != nil {
+		return lockErr
+	}
+	defer func() { _ = unlockNamespace() }()
+
 	parentRef := &provider.Reference{
 		ResourceId: ref.ResourceId,
 		Path:       path.Dir(ref.Path),
@@ -927,10 +939,33 @@ func (fs *Decomposedfs) CreateReference(ctx context.Context, p string, targetURI
 
 // Move moves a resource from one reference to another
 func (fs *Decomposedfs) Move(ctx context.Context, oldRef, newRef *provider.Reference) (*storage.MoveResult, error) {
+	return fs.MoveConditional(ctx, oldRef, newRef, storage.MoveOptions{})
+}
+
+func (fs *Decomposedfs) lockNamespace(ctx context.Context, ref *provider.Reference, exclusive bool) (metadata.UnlockFunc, error) {
+	spaceID := ref.GetResourceId().GetSpaceId()
+	if spaceID == "" {
+		n, err := fs.lu.NodeFromResource(ctx, ref)
+		if err != nil {
+			return nil, err
+		}
+		spaceID = n.SpaceID
+	}
+	return node.LockNamespace(ctx, fs.lu, spaceID, exclusive)
+}
+
+func (fs *Decomposedfs) MoveConditional(ctx context.Context, oldRef, newRef *provider.Reference, options storage.MoveOptions) (*storage.MoveResult, error) {
 	ctx, span := tracer.Start(ctx, "Move")
 	defer span.End()
+	if err := options.Conditions.Validate(); err != nil {
+		return nil, err
+	}
+	unlockNamespace, err := fs.lockNamespace(ctx, oldRef, true)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = unlockNamespace() }()
 	var oldNode, newNode *node.Node
-	var err error
 	if oldNode, err = fs.lu.NodeFromResource(ctx, oldRef); err != nil {
 		return nil, err
 	}
@@ -939,6 +974,11 @@ func (fs *Decomposedfs) Move(ctx context.Context, oldRef, newRef *provider.Refer
 		return nil, errtypes.NotFound(filepath.Join(oldNode.ParentID, oldNode.Name))
 	}
 
+	oldNode, unlock, err := node.LockAndReadNode(ctx, fs.lu, oldNode.SpaceID, oldNode.ID, "", false, oldNode.SpaceRoot, false)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = unlock() }()
 	orp, err := fs.p.AssemblePermissions(ctx, oldNode)
 	switch {
 	case err != nil:
@@ -960,7 +1000,10 @@ func (fs *Decomposedfs) Move(ctx context.Context, oldRef, newRef *provider.Refer
 	if newNode, err = fs.lu.NodeFromResource(ctx, newRef); err != nil {
 		return nil, err
 	}
-	if newNode.Exists {
+	if oldNode.SpaceID != newNode.SpaceID {
+		return nil, errtypes.NotSupported("cannot move across spaces")
+	}
+	if newNode.Exists && (!options.Overwrite || oldNode.ID == newNode.ID) {
 		return nil, errtypes.AlreadyExists(filepath.Join(newNode.ParentID, newNode.Name))
 	}
 
@@ -982,6 +1025,16 @@ func (fs *Decomposedfs) Move(ctx context.Context, oldRef, newRef *provider.Refer
 		return nil, errtypes.NotFound(f)
 	}
 
+	if newNode.Exists {
+		if err := fs.checkParentPermission(ctx, newNode, newRef, func(p *provider.ResourcePermissions) bool {
+			if oldNode.IsDir(ctx) {
+				return p.CreateContainer
+			}
+			return p.InitiateFileUpload
+		}); err != nil {
+			return nil, err
+		}
+	}
 	// check lock on source
 	if err := oldNode.CheckLock(ctx); err != nil {
 		return nil, err
@@ -990,6 +1043,26 @@ func (fs *Decomposedfs) Move(ctx context.Context, oldRef, newRef *provider.Refer
 		return nil, errtypes.ResourceProcessing(oldRef.String())
 	}
 
+	if !options.Conditions.Empty() {
+		etag, err := oldNode.ETag(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if err := options.Conditions.Evaluate(true, etag); err != nil {
+			return nil, err
+		}
+	}
+	if newNode.Exists {
+		if err := fs.delete(ctx, newRef, preconditions.Conditions{}); err != nil {
+			return nil, err
+		}
+		newNode, err = fs.lu.NodeFromResource(ctx, newRef)
+		if err != nil {
+			return nil, err
+		}
+	}
+	newNode.SetLockHeld(true)
+	defer newNode.SetLockHeld(false)
 	if err := fs.tp.Move(ctx, oldNode, newNode); err != nil {
 		return nil, err
 	}
@@ -1208,18 +1281,39 @@ func (fs *Decomposedfs) RemoveLabel(ctx context.Context, ref *provider.Reference
 }
 
 // Delete deletes the specified resource
-func (fs *Decomposedfs) Delete(ctx context.Context, ref *provider.Reference) (err error) {
+func (fs *Decomposedfs) Delete(ctx context.Context, ref *provider.Reference) error {
+	return fs.DeleteConditional(ctx, ref, preconditions.Conditions{})
+}
+
+func (fs *Decomposedfs) DeleteConditional(ctx context.Context, ref *provider.Reference, conditions preconditions.Conditions) error {
+	if err := conditions.Validate(); err != nil {
+		return err
+	}
+	unlock, err := fs.lockNamespace(ctx, ref, true)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = unlock() }()
+	return fs.delete(ctx, ref, conditions)
+}
+
+func (fs *Decomposedfs) delete(ctx context.Context, ref *provider.Reference, conditions preconditions.Conditions) (err error) {
 	ctx, span := tracer.Start(ctx, "Delete")
 	defer span.End()
-	var node *node.Node
-	if node, err = fs.lu.NodeFromResource(ctx, ref); err != nil {
+	var n *node.Node
+	if n, err = fs.lu.NodeFromResource(ctx, ref); err != nil {
 		return
 	}
-	if !node.Exists {
-		return errtypes.NotFound(filepath.Join(node.ParentID, node.Name))
+	if !n.Exists {
+		return errtypes.NotFound(filepath.Join(n.ParentID, n.Name))
 	}
 
-	rp, err := fs.p.AssemblePermissions(ctx, node)
+	n, unlock, err := node.LockAndReadNode(ctx, fs.lu, n.SpaceID, n.ID, "", false, n.SpaceRoot, false)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = unlock() }()
+	rp, err := fs.p.AssemblePermissions(ctx, n)
 	switch {
 	case err != nil:
 		return err
@@ -1233,21 +1327,30 @@ func (fs *Decomposedfs) Delete(ctx context.Context, ref *provider.Reference) (er
 	parentAllowsDelete := func(parentPerms *provider.ResourcePermissions) bool {
 		return parentPerms.GetDelete()
 	}
-	if err := fs.checkParentPermission(ctx, node, ref, parentAllowsDelete); err != nil {
+	if err := fs.checkParentPermission(ctx, n, ref, parentAllowsDelete); err != nil {
 		return err
 	}
 
 	// Set space owner in context
-	storagespace.ContextSendSpaceOwnerID(ctx, node.SpaceOwnerOrManager(ctx))
+	storagespace.ContextSendSpaceOwnerID(ctx, n.SpaceOwnerOrManager(ctx))
 
-	if err := node.CheckLock(ctx); err != nil {
+	if err := n.CheckLock(ctx); err != nil {
 		return err
 	}
-	if node.IsProcessing(ctx) {
+	if n.IsProcessing(ctx) {
 		return errtypes.ResourceProcessing(ref.String())
 	}
 
-	return fs.tp.Delete(ctx, node)
+	if !conditions.Empty() {
+		etag, err := n.ETag(ctx)
+		if err != nil {
+			return err
+		}
+		if err := conditions.Evaluate(true, etag); err != nil {
+			return err
+		}
+	}
+	return fs.tp.Delete(ctx, n)
 }
 
 // Download returns a reader to the specified resource

@@ -81,6 +81,12 @@ func (fs *Decomposedfs) CommitUpload(ctx context.Context, ref *provider.Referenc
 		return errtypes.BadRequest("Decomposedfs: sessionID is empty")
 	}
 
+	unlockNamespace, err := fs.lockNamespace(ctx, ref, false)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = unlockNamespace() }()
+
 	n, err := fs.lu.NodeFromResource(ctx, ref)
 	if err != nil {
 		appctx.GetLogger(ctx).Error().Err(err).Msg("CommitUpload: unexpected NodeFromResource failure")

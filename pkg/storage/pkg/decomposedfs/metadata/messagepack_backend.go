@@ -309,6 +309,9 @@ func (MessagePackBackend) LockfilePath(n MetadataNode) string { return n.Interna
 
 // Lock locks the metadata for the given path
 func (b MessagePackBackend) Lock(n MetadataNode) (UnlockFunc, error) {
+	if n.InternalPath() == "" {
+		return nil, os.ErrNotExist
+	}
 	if n.LockHeld() {
 		return func() error { return nil }, nil
 	}
